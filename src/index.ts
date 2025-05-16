@@ -12,74 +12,41 @@ const client = new Client({
 });
 const TOKEN = process.env.DISCORD_TOKEN;
 const CHANNEL_SF = process.env.CHANNEL_SF;
-const messageSfsInOrder: { id: BigInt; ms: number }[] = [];
+const OLDEST_SF = process.env.OLDEST_SF;
 const fmt = (ms?: number) => ms && new Date(ms).toLocaleString();
 
-async function ScanToTopOfChannel(channelSf: string) {
-  const channel = client.channels.cache.get(channelSf);
-  if (channel?.type !== ChannelType.GuildText) {
-    console.error('Invalid channel ID or not a text channel');
-    return;
-  }
-
-  const limit = 100;
-  let oldestMessage: Message | undefined;
-  while (true) {
-    const messages = await channel.messages.fetch({
-      limit,
-      before: oldestMessage?.id,
-    });
-    if (!messages.size) break;
-    const messagesEarliestFirst = messages.sorted(
-      (a, b) => a.createdTimestamp - b.createdTimestamp,
-    );
-    oldestMessage = messagesEarliestFirst.first();
-    const time = fmt(oldestMessage?.createdTimestamp);
-    console.log(`${messages.size} messages fetched; ${time}`);
-    messageSfsInOrder.unshift(
-      ...messagesEarliestFirst.map(m => ({
-        id: BigInt(m.id),
-        ms: m.createdTimestamp,
-      })),
-    );
-    //Sleep two seconds
-    await new Promise(resolve => setTimeout(resolve, 2000));
-  }
-  console.log(`Oldest: ${fmt(oldestMessage?.createdTimestamp)}`);
-
-  client.on('messageCreate', async message => {
-    if (message.channelId !== channelSf) return;
-    messageSfsInOrder.push({
-      id: BigInt(message.id),
-      ms: message.createdTimestamp,
-    });
-    const oldestTwo = messageSfsInOrder.slice(0, 2);
-    const olderThanThirtyDays = oldestTwo.filter(
-      m => Date.now() - m.ms > thirtyDaysInMilliseconds,
-    );
-    for (const m of olderThanThirtyDays) {
-      try {
-        const messageToDelete = await channel.messages.fetch(m.id.toString());
-        if (messageToDelete) {
-          await messageToDelete.delete();
-          messageSfsInOrder.splice(
-            messageSfsInOrder.findIndex(m => m.id === m.id),
-            1,
-          );
-          console.log(`Deleted ${fmt(messageToDelete.createdTimestamp)}`);
-        }
-      } catch {
-      }
-    }
-  });
-}
-
-if (!TOKEN || !CHANNEL_SF) {
-  console.error('Missing DISCORD_TOKEN or CHANNEL_ID in .env file');
+if (!TOKEN || !CHANNEL_SF || !OLDEST_SF) {
+  console.error('Missing DISCORD_TOKEN or CHANNEL_ID or OLDEST_SF in .env');
 } else {
   client.once('ready', async () => {
     console.log(`Logged in as ${client.user?.tag}!`);
-    await ScanToTopOfChannel(CHANNEL_SF);
+    const channel = await client.channels.fetch(CHANNEL_SF);
+    if (!channel || channel.type !== ChannelType.GuildText) {
+      console.error('Could not find text channel');
+      return;
+    }
+
+    while (true) {
+      const oldestMessages = [
+        ...(await channel.messages
+          .fetch({ limit: 100, around: OLDEST_SF })
+          .then(messages => messages.filter(m => m.id !== OLDEST_SF).values())),
+      ];
+        await new Promise(resolve => setTimeout(resolve, 1_000));
+      const olderThanThirtyDays = oldestMessages.filter(
+        m => Date.now() - m.createdTimestamp > thirtyDaysInMilliseconds,
+      );
+      for (const m of olderThanThirtyDays) {
+        try {
+          const messageToDelete = await channel.messages.fetch(m.id.toString());
+          if (messageToDelete) {
+            await messageToDelete.delete();
+            console.log(`Deleted ${fmt(messageToDelete.createdTimestamp)}`);
+          }
+        } catch {}
+        await new Promise(resolve => setTimeout(resolve, 2_000));
+      }
+    }
   });
 
   client.login(TOKEN).catch(console.error);
